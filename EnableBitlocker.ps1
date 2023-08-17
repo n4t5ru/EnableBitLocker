@@ -23,14 +23,18 @@
     GPUPDATE /Force
 #>
 
+# Global Variables
+$GB_Pcname = $env:COMPUTERNAME | Select-Object;
+$GB_Passcode
+
 # This function creates required code for hosts with TPM
 function createCode {
 
     # Retrieves the hostname
-    $initialName = $env:COMPUTERNAME | Select-Object;
+    $DeviceName = $env:COMPUTERNAME | Select-Object;
 
     # Removes any symbols in the hostnames and replaces with no char
-    $convertedName = $initialName.Replace("-","").Replace("_","").Replace(".","").Replace(" ", "")
+    $convertedName = $DeviceName.Replace("-","").Replace("_","").Replace(".","").Replace(" ", "")
     
     $pcName_Array = $convertedName.ToCharArray()
 
@@ -40,17 +44,19 @@ function createCode {
 
     $code = $HEX_CODE.Substring($HEX_CODE.Length - 5)
 
-    return $code
+    $SecureCode = ConvertTo-SecureString $code -AsPlainText -Force
+
+    return $SecureCode
 }
 
 # This function creates required passcode for hosts without TPM
 function createPassCode {
 
     # Retrieves the hostname
-    $initialName = $env:COMPUTERNAME | Select-Object;
+    $DeviceName = $env:COMPUTERNAME | Select-Object;
 
     # Removes any symbols in the hostnames and replaces with no char
-    $convertedName = $initialName.Replace("-","").Replace("_","").Replace(".","").Replace(" ", "")
+    $convertedName = $DeviceName.Replace("-","").Replace("_","").Replace(".","").Replace(" ", "")
     
     $pcName_Array = $convertedName.ToCharArray()
 
@@ -59,9 +65,13 @@ function createPassCode {
     }
 
     # Add desired string to either end or the beginning of the code.
-    $code = $HEX_CODE.Substring($HEX_CODE.Length - 5) + '' 
+    $code = $HEX_CODE.Substring($HEX_CODE.Length - 5) + '$DFC'
 
-    return $code
+    Write-Host "Code is $code"
+
+    $SecureCode = ConvertTo-SecureString $code -AsPlainText -Force
+
+    return $SecureCode
 }
 
 # This function is used to convert multiple device names (if exported) to hex codes
@@ -101,6 +111,26 @@ function generateHexandPassCodes {
 
 }
 
+workflow CodeGeneration{
+    # Variable to store the returned HEX Code from createCode Function
+    $GB_Passcode = createCode
+
+    return "Im in workflow..."
+
+    # Convert the variable to a secure string
+    #$SecureCode = ConvertTo-SecureString $GB_Passcode -AsPlainText -Force
+
+    Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -TPMandPinProtector -Pin $GB_Passcode
+    return "Im in workflow.. Before restart"
+    Restart-Computer -Wait
+
+    # Retrieve and save the recovery key to the specified file
+    $recoveryInfo = Get-BitLockerVolume -MountPoint "C:"
+    $recoveryKey = $recoveryInfo.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" }
+    $recoveryKey.RecoveryPassword | Out-File -FilePath $RecoveryKeyPath
+}
+
+
 function main(){
 
     # If the GPOs have been update via server keep this uncommented.
@@ -112,28 +142,28 @@ function main(){
     # If the protection is off, runs the default commands
     if($manageBDE[13] -eq '    Identification Field: None'){
 
+        $RecoveryKeyPath = "C:\$GB_Pcname.txt"
         $tpmCheck = Get-Tpm | Out-String
         $tpmArray = @($tpmCheck.Split([System.Environment]::NewLine,[System.StringSplitOptions]::RemoveEmptyEntries))
 
-        if($tpmArray[0] = 'TpmPresent                : True'){
-
-            # Variable to store the returned HEX Code from createCode Function
-            $returnedVaule = createCode
-
-            # Convert the variable to a secure string
-            $Pin = ConvertTo-SecureString $returnedVaule -AsPlainText -Force
-
-            Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -Pin $Pin -TPMandPinProtector
-
+        if($tpmArray[0] -eq 'TpmPresent                : True'){
+            CodeGeneration
         }
         else{
             # Variable to store the returned HEX and String from createPassCode Function
-            $returnedVaule = createPassCode
+            $GB_Passcode = createPassCode
 
             # Convert the variable to a secure string
-            $Password = ConvertTo-SecureString $returnedVaule -AsPlainText -Force
+            $SecureCode = ConvertTo-SecureString $GB_Passcode -AsPlainText -Force
 
-            Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -PasswordProtector -Password $Password
+            #Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes128 -PasswordProtector -Password $SecureCode -RecoveryKeyPath "C:\$GB_Pcname.txt"
+
+            Enable-BitLocker -MountPoint "C:" -PasswordProtector -Password $SecureCode
+            
+            # Retrieve and save the recovery key to the specified file
+            $recoveryInfo = Get-BitLockerVolume -MountPoint "C:"
+            $recoveryKey = $recoveryInfo.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" }
+            $recoveryKey.RecoveryPassword | Out-File -FilePath $RecoveryKeyPath
         }
 
     }
@@ -143,12 +173,12 @@ function main(){
 
         Manage-BDE -Off C:
 
-        Write-Host "Your Drive is being Decrypted. Please Keep the Script Running..." -ForegroundColor Red
+        Write-Host "Your Drive is being Decrypted. Please Keep the Script Running..."
 
         $status = Manage-BDE -Status C:
             
         if($status[9] -ne '    Percentage Encrypted: 0.0%'){
-            [bool] $statusCheck = $true
+            $statusCheck = $true
 
             while($statusCheck -eq $true){
 
@@ -158,32 +188,32 @@ function main(){
                 Start-Sleep 10
                 
                 if ($whileStatus[9] -eq '    Percentage Encrypted: 0.0%') {
-                    Write-Host "Decryption Completed!" -ForegroundColor Green
+                    Write-Host "Decryption Completed!"
                     $statusCheck = $false
 
                     $tpmCheck2 = Get-Tpm | Out-String
                     $tpmArray2 = @($tpmCheck2.Split([System.Environment]::NewLine,[System.StringSplitOptions]::RemoveEmptyEntries))
 
                     if($tpmArray2[0] -eq 'TpmPresent                : True') {
-                
-                        # Variable to store the returned HEX Code from createCode Function
-                        $returnedVaule = createCode
-        
-                        # Convert the variable to a secure string
-                        $Pin = ConvertTo-SecureString $returnedVaule -AsPlainText -Force
-        
-                        Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -Pin $Pin -TPMandPinProtector
-        
+                        return "Code Generation Reached."
+                        CodeGeneration
                     }
                     else {
         
                         # Variable to store the returned HEX and String from createPassCode Function
-                        $returnedVaule = createPassCode
+                        $GB_Passcode = createPassCode
         
                         # Convert the variable to a secure string
-                        $Password = ConvertTo-SecureString $returnedVaule -AsPlainText -Force
+                        $SecureCode = ConvertTo-SecureString $GB_Passcode -AsPlainText -Force
         
-                        Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes256 -PasswordProtector -Password $Password
+                        #Enable-BitLocker -MountPoint "C:" -EncryptionMethod Aes128 -PasswordProtector -Password $SecureCode -RecoveryKeyPath "C:\$GB_Pcname.txt"
+
+                        Enable-BitLocker -MountPoint "C:" -PasswordProtector -Password $SecureCode
+
+                        # Retrieve and save the recovery key to the specified file
+                        $recoveryInfo = Get-BitLockerVolume -MountPoint "C:"
+                        $recoveryKey = $recoveryInfo.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" }
+                        $recoveryKey.RecoveryPassword | Out-File -FilePath $RecoveryKeyPath
                     }
                 }
                 
@@ -191,14 +221,17 @@ function main(){
         }
     }
 
-    Write-Host "Your Device will restart in 10 Seconds."
+    Write-Host "Your Device name is $GB_Pcname and your Passcode is $GB_Passcode"
 
-    Start-sleep 10
+    Write-Host "Your Device will restart in 20 Seconds."
 
-    Remove-Item $PSCommandPath -Force
+    Start-sleep 20
 
-    Restart-Computer -Force
+    #Remove-Item $PSCommandPath -Force
 
+    #Restart-Computer -Force
+
+    Exit-PSSession
 }
 
 # Uncomment and Comment-out as per your requirement. 
